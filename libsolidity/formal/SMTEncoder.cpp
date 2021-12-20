@@ -1313,17 +1313,23 @@ void SMTEncoder::endVisit(Return const& _return)
 
 bool SMTEncoder::visit(MemberAccess const& _memberAccess)
 {
-	auto const& accessType = _memberAccess.annotation().type;
-	if (accessType->category() == Type::Category::Function)
-		return true;
-
 	createExpr(_memberAccess);
+
+	auto const& accessType = _memberAccess.annotation().type;
 
 	Expression const* memberExpr = innermostTuple(_memberAccess.expression());
 
 	auto const& exprType = memberExpr->annotation().type;
 	solAssert(exprType, "");
-	if (exprType->category() == Type::Category::Magic)
+
+	if (accessType->category() == Type::Category::Function)
+	{
+		auto const* functionType = dynamic_cast<FunctionType const*>(accessType);
+		if (functionType->hasDeclaration())
+			defineExpr(_memberAccess, functionType->externalIdentifier());
+		return true;
+	}
+	else if (exprType->category() == Type::Category::Magic)
 	{
 		if (auto const* identifier = dynamic_cast<Identifier const*>(memberExpr))
 		{
