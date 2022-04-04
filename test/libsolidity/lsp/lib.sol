@@ -5,6 +5,7 @@ pragma solidity >=0.8.0;
 error E(uint, uint);
 
 enum Weather {
+//   ^^^^^^^ @whetherEnum
     Sunny,
     Cloudy,
     Rainy
@@ -48,3 +49,4 @@ struct RGBColor
     uint8 blue;
 }
 // ----
+// lib: @diagnostics 2072

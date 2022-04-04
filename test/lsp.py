@@ -342,7 +342,7 @@ class TestParser:
         diagnostics["start"] = self.position()
 
         while self.currentLine is not None:
-            print(self.currentLine)
+            #print(self.currentLine)
             fileDiagMatch = TEST_REGEXES.fileDiagnostics.match(self.line())
             if fileDiagMatch is None:
                 break
@@ -461,6 +461,7 @@ class FileTestRunner:
 
             published_diagnostics = \
                 self.suite.open_file_and_wait_for_diagnostics(self.solc, self.test_name, len(tests))
+
             print(published_diagnostics)
             for diagnostics in published_diagnostics:
                 self.open_tests.append(diagnostics["uri"].replace(self.suite.project_root_uri + "/", "")[:-len(".sol")])
@@ -502,11 +503,21 @@ class FileTestRunner:
             raise
 
     def close_open_files(self):
+        # Do a non-blocking test read to make sure we didn't receive more
+        # diagnostics than expected
+        try:
+            self.solc.read_message(peek=False, block=False)
+            raise ExpectationFailed("Received more diagnostics than expected!")
+        except queue.Empty:
+            pass
+
         for test in self.open_tests:
             self.solc.send_message(
                 'textDocument/didClose',
                 { 'textDocument': { 'uri': self.suite.get_test_file_uri(test) }}
             )
+            print(f"closing: {test}")
+
 
         self.solc.clear_received_messages(len(self.open_tests), True)
         self.open_tests.clear()
@@ -923,6 +934,9 @@ class SolidityLSPTestSuite: # {{{
 
     def replace_ranges_with_tags(self, content):
         # Replace matching ranges with "@<tagname>"
+        if "result" not in content:
+            return str(content)
+
         for result in content["result"]:
             markers = self.get_file_tags(result["uri"][:-len(".sol")])
             if "range" in result:
@@ -936,7 +950,11 @@ class SolidityLSPTestSuite: # {{{
         # remove the quotes and return result
         return "".join(map(lambda p: p[1:-1] if p.startswith('"@') else p, split_by_tag))
 
-    def userInteractionFailedDiagnostics(self, solc: JsonRpcProcess, test, content, current_diagnostics: TestParser.Diagnostics):
+    def user_interaction_failed_diagnostics(self, solc: JsonRpcProcess, test, content, current_diagnostics: TestParser.Diagnostics):
+        """
+        Asks the user how to proceed after an error.
+        Returns True if the result should be ignored, otherwise False
+        """
         print("(u)pdate/(r)etry/(i)gnore?")
         userResponse = sys.stdin.read(1)
         if userResponse == "u":
@@ -958,37 +976,24 @@ class SolidityLSPTestSuite: # {{{
                         )
                         # pragma pylint: disable=no-member
                         self.get_file_tags.cache_clear()
+                        continue
                     elif userResponse == "r":
                         print("retrying...")
                         # pragma pylint: disable=no-member
                         self.get_file_tags.cache_clear()
-                        break
+                        return False
                     elif userResponse == "i":
                         print("ignoring...")
-                        break
+                        return True
+        elif userResponse == 'i':
+            return True
+        else:
+            return False
 
 
     # }}}
 
     # {{{ actual tests
-
-    def test_publish_diagnostics_errors(self, solc: JsonRpcProcess) -> None:
-        self.setup_lsp(solc)
-        TEST_NAME = 'publish_diagnostics_2'
-        published_diagnostics = self.open_file_and_wait_for_diagnostics(solc, TEST_NAME)
-
-        self.expect_equal(len(published_diagnostics), 1, "One published_diagnostics message")
-        report = published_diagnostics[0]
-
-        self.expect_equal(report['uri'], self.get_test_file_uri(TEST_NAME), "Correct file URI")
-        diagnostics = report['diagnostics']
-
-        markers = self.get_file_tags(TEST_NAME)
-
-        self.expect_equal(len(diagnostics), 3, "3 diagnostic messages")
-        self.expect_diagnostic(diagnostics[0], code=9574, marker=markers["@conversionError"])
-        self.expect_diagnostic(diagnostics[1], code=6777, marker=markers["@argumentsRequired"])
-        self.expect_diagnostic(diagnostics[2], code=6160, marker=markers["@wrongArgumentsCount"])
 
     def test_publish_diagnostics_errors_multiline(self, solc: JsonRpcProcess) -> None:
         self.setup_lsp(solc)
@@ -1144,7 +1149,7 @@ class SolidityLSPTestSuite: # {{{
         self.setup_lsp(solc)
 
 
-        TESTS = ['goto_definition', 'publish_diagnostics_1']
+        TESTS = ['goto_definition', 'goto_definition_imports', 'publish_diagnostics_1', 'publish_diagnostics_2', 'lib']
 
         for test in TESTS:
             testFails = True
@@ -1158,18 +1163,19 @@ class SolidityLSPTestSuite: # {{{
                         print("Diagnostics fails")
                         continue
                     result = runner.test_methods()
-                    print(f"method result: {result}")
                     testFails = not result
 
                 except ExpectationFailed as e:
                     print(e)
-                    self.userInteractionFailedDiagnostics(
+                    ignore = self.user_interaction_failed_diagnostics(
                         solc,
                         test,
                         runner.content,
                         runner.expected_diagnostics
                     )
-                    continue
+
+                    if ignore:
+                        break
 
 
 
@@ -1418,24 +1424,6 @@ class SolidityLSPTestSuite: # {{{
         self.expect_equal(len(report3['diagnostics']), 1, "one diagnostic")
         self.expect_diagnostic(report3['diagnostics'][0], 4126, 6, (1, 23))
 
-    def test_textDocument_definition(self, solc: JsonRpcProcess) -> None:
-        self.setup_lsp(solc)
-        FILE_NAME = 'goto_definition'
-        FILE_URI = self.get_test_file_uri(FILE_NAME)
-        solc.send_message('textDocument/didOpen', {
-            'textDocument': {
-                'uri': FILE_URI,
-                'languageId': 'Solidity',
-                'version': 1,
-                'text': self.get_test_file_contents(FILE_NAME)
-            }
-        })
-        published_diagnostics = self.wait_for_diagnostics(solc, 2)
-        self.expect_equal(len(published_diagnostics), 2, "publish diagnostics for 2 files")
-        self.expect_equal(len(published_diagnostics[0]['diagnostics']), 1)
-        self.expect_equal(len(published_diagnostics[1]['diagnostics']), 1)
-        self.expect_diagnostic(published_diagnostics[1]['diagnostics'][0], 2072, 37, (8, 19)) # unused variable in lib.sol
-
     def test_textDocument_definition_imports(self, solc: JsonRpcProcess) -> None:
         self.setup_lsp(solc)
         FILE_NAME = 'goto_definition_imports'
@@ -1453,7 +1441,7 @@ class SolidityLSPTestSuite: # {{{
         self.expect_equal(len(published_diagnostics), 2, "publish diagnostics for 2 files")
         self.expect_equal(len(published_diagnostics[0]['diagnostics']), 0)
         self.expect_equal(len(published_diagnostics[1]['diagnostics']), 1)
-        self.expect_diagnostic(published_diagnostics[1]['diagnostics'][0], 2072, 37, (8, 19)) # unused variable in lib.sol
+        self.expect_diagnostic(published_diagnostics[1]['diagnostics'][0], 2072, 38, (8, 19)) # unused variable in lib.sol
 
         # import directive: test symbol alias
         self.expect_goto_definition_location(
